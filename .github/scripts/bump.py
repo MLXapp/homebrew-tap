@@ -41,6 +41,13 @@ CASK = '''cask "{token}" do
 
   app "MLX Node.app"
 
+  # the same finish as `curl -fsSL mlx.app/i | sh`: no "downloaded from the Internet" question on first launch (the
+  # build is notarized and its checksum is pinned above) and MLX Node opens in the menu bar
+  postflight do
+    system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{{appdir}}/MLX Node.app"]
+    system_command "/usr/bin/open", args: ["#{{appdir}}/MLX Node.app"] unless ENV["HOMEBREW_MLX_NO_OPEN"]
+  end
+
   uninstall quit: "app.mlx.mac"
 
   zap trash: [
