@@ -1,6 +1,8 @@
-# Keeps the MLX Node casks on the public release: every 15 minutes it asks mlx.app for the latest version; when it
-# changed, a Mac checks the disk image (Developer ID of team CCKXS9W488, bundle app.mlx.mac, notarized), installs and
-# uninstalls it with Homebrew, and only then commits the new casks. Run it by hand from the Actions tab any time.
+# Keeps the MLX Node casks on the public release. Every 15 minutes it asks mlx.app for the latest version; when it
+# changed, it downloads the disk image, checks that its SHA-256 matches what mlx.app says, writes both casks and commits
+# them. Then a Mac checks the image (Developer ID of team CCKXS9W488, bundle app.mlx.mac, notarized) and installs and
+# uninstalls it with Homebrew. mlx.app only publishes a build after its own CI has signed, notarized and tested it, so
+# the casks don't wait for a Mac runner (GitHub's macOS queue can take hours). Run it by hand from the Actions tab.
 name: Update MLX Node
 
 on:
@@ -9,46 +11,66 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: "Test and rewrite the casks even when the version didn't change"
+        description: "Rewrite the casks even when the version didn't change"
         type: boolean
         default: false
 
 permissions:
   contents: write
 
-concurrency:
-  group: update
-  cancel-in-progress: false
-
 jobs:
-  check:
+  update:
     runs-on: ubuntu-latest
+    # one writer at a time; the Mac test below waits for its own runner without holding the next update back
+    concurrency:
+      group: update
+      cancel-in-progress: false
     outputs:
       changed: ${{ steps.check.outputs.changed }}
       version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
       - id: check
         run: python3 .github/scripts/bump.py check
 
-  release:
-    needs: check
-    if: needs.check.outputs.changed == 'true' || inputs.force
+      - name: Write the casks (checksum computed from the download)
+        if: steps.check.outputs.changed == 'true' || inputs.force
+        run: |
+          python3 .github/scripts/bump.py apply
+          ruby -c Casks/node.rb
+          ruby -c Casks/mlx-node.rb
+
+      - name: Commit
+        if: steps.check.outputs.changed == 'true' || inputs.force
+        run: |
+          set -euo pipefail
+          git config user.name "MLX"
+          git config user.email "noreply@mlx.app"
+          git add Casks
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "MLX Node ${{ steps.check.outputs.version }}"
+          git push
+
+  test:
+    needs: update
+    if: needs.update.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
+    timeout-minutes: 30
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
     steps:
       - uses: actions/checkout@v4
-
-      - name: Write the casks (checksum computed from the download)
-        run: python3 .github/scripts/bump.py apply
+        with:
+          ref: main
 
       - name: Check the disk image is MLX Node, signed by MLX and notarized
         run: |
           set -euo pipefail
-          v="${{ needs.check.outputs.version }}"
+          v=$(sed -n 's/^  version "\(.*\)"$/\1/p' Casks/node.rb)
           curl -fsSL -A "MLXapp-homebrew-tap" -o node.dmg "https://mlx.app/api/download/mac/$v"
+          test "$(shasum -a 256 node.dmg | cut -d' ' -f1)" = "$(sed -n 's/^  sha256 "\(.*\)"$/\1/p' Casks/node.rb)"
           mnt=$(mktemp -d)
           hdiutil attach -nobrowse -readonly -mountpoint "$mnt" node.dmg >/dev/null
           app="$mnt/MLX Node.app"
@@ -90,13 +112,3 @@ jobs:
           brew install --cask mlxapp/tap/mlx-node
           test -d "/Applications/MLX Node.app"
           brew uninstall --cask mlxapp/tap/mlx-node
-
-      - name: Commit
-        run: |
-          set -euo pipefail
-          git config user.name "MLX"
-          git config user.email "noreply@mlx.app"
-          git add Casks
-          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
-          git commit -m "MLX Node ${{ needs.check.outputs.version }}"
-          git push
