@@ -1,0 +1,102 @@
+# Keeps the MLX Node casks on the public release: every 15 minutes it asks mlx.app for the latest version; when it
+# changed, a Mac checks the disk image (Developer ID of team CCKXS9W488, bundle app.mlx.mac, notarized), installs and
+# uninstalls it with Homebrew, and only then commits the new casks. Run it by hand from the Actions tab any time.
+name: Update MLX Node
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Test and rewrite the casks even when the version didn't change"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: python3 .github/scripts/bump.py check
+
+  release:
+    needs: check
+    if: needs.check.outputs.changed == 'true' || inputs.force
+    runs-on: macos-latest
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write the casks (checksum computed from the download)
+        run: python3 .github/scripts/bump.py apply
+
+      - name: Check the disk image is MLX Node, signed by MLX and notarized
+        run: |
+          set -euo pipefail
+          v="${{ needs.check.outputs.version }}"
+          curl -fsSL -A "MLXapp-homebrew-tap" -o node.dmg "https://mlx.app/api/download/mac/$v"
+          mnt=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" node.dmg >/dev/null
+          app="$mnt/MLX Node.app"
+          test -d "$app"
+          codesign --verify --deep --strict "$app"
+          info=$(codesign -dv --verbose=4 "$app" 2>&1)
+          echo "$info" | grep -q "^Identifier=app.mlx.mac$"
+          echo "$info" | grep -q "^TeamIdentifier=CCKXS9W488$"
+          echo "$info" | grep -q "Authority=Developer ID Application"
+          spctl -a -t exec -vv "$app"
+          test "$(defaults read "$app/Contents/Info" CFBundleShortVersionString)" = "$v"
+          hdiutil detach "$mnt" >/dev/null
+          rm -f node.dmg
+
+      - name: Use this checkout as the mlxapp/tap tap
+        run: |
+          taps="$(brew --repository)/Library/Taps/mlxapp"
+          mkdir -p "$taps"
+          rm -rf "$taps/homebrew-tap"
+          ln -s "$GITHUB_WORKSPACE" "$taps/homebrew-tap"
+
+      - name: Style and audit
+        continue-on-error: true
+        run: |
+          brew style mlxapp/tap
+          brew audit --cask --online mlxapp/tap/node mlxapp/tap/mlx-node
+
+      - name: Install and uninstall with Homebrew
+        env:
+          HOMEBREW_MLX_NO_OPEN: "1" # the casks open MLX Node after installing; not on a CI runner
+        run: |
+          set -euo pipefail
+          brew install --cask mlxapp/tap/node
+          test -d "/Applications/MLX Node.app"
+          # no "downloaded from the Internet" question on first launch
+          if xattr -p com.apple.quarantine "/Applications/MLX Node.app" >/dev/null 2>&1; then echo "still quarantined"; exit 1; fi
+          spctl -a -t exec -vv "/Applications/MLX Node.app"
+          brew uninstall --cask mlxapp/tap/node
+          brew install --cask mlxapp/tap/mlx-node
+          test -d "/Applications/MLX Node.app"
+          brew uninstall --cask mlxapp/tap/mlx-node
+
+      - name: Commit
+        run: |
+          set -euo pipefail
+          git config user.name "MLX"
+          git config user.email "noreply@mlx.app"
+          git add Casks
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "MLX Node ${{ needs.check.outputs.version }}"
+          git push
