@@ -1,6 +1,6 @@
 cask "node" do
-  version "0.18.3"
-  sha256 "440181058e3704f950f4a5efbb24fcc5fe597e7b09693345b43f43ee6a11142c"
+  version "0.18.4"
+  sha256 "6d2c3d4a552fffa6e71862fe0543fe338fb9a6ad19f9988daab33e3010df9725"
 
   url "https://mlx.app/api/download/mac/#{version}"
   name "MLX Node"
